@@ -2,7 +2,7 @@ import streamlit as st
 import cv2
 import numpy as np
 
-# UI 기본 설정 (넓은 화면, 탭 제목 및 아이콘 설정)
+# UI 기본 설정
 st.set_page_config(
     page_title="Auto Colony Counter",
     page_icon="🧫",
@@ -13,7 +13,6 @@ st.set_page_config(
 # --- 🎨 커스텀 CSS 스타일링 ---
 st.markdown("""
     <style>
-    /* 타이틀 폰트 및 여백 조정 */
     .main-title {
         font-size: 2.5rem;
         font-weight: 700;
@@ -25,8 +24,6 @@ st.markdown("""
         font-size: 1.1rem;
         margin-bottom: 2rem;
     }
-    
-    /* 버튼 호버 애니메이션 */
     div[data-testid="stButton"] button {
         border-radius: 8px;
         transition: all 0.2s ease-in-out;
@@ -38,7 +35,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 방향키 조작을 위해 X, Y 위치값을 기억하는 세션 상태 초기화
 if 'x_offset' not in st.session_state:
     st.session_state.x_offset = 0
 if 'y_offset' not in st.session_state:
@@ -54,6 +50,7 @@ def count_colonies_watershed(file_bytes, edge_crop=0.82, x_offset=0, y_offset=0,
         
     gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
 
+    # 1. 배지 영역 마스킹용 블러
     blur_for_mask = cv2.GaussianBlur(gray, (51, 51), 0)
     _, mask_thresh = cv2.threshold(blur_for_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(mask_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -73,23 +70,32 @@ def count_colonies_watershed(file_bytes, edge_crop=0.82, x_offset=0, y_offset=0,
             center = (int(x + x_offset), int(y + y_offset))
             cv2.circle(mask, center, int(radius * edge_crop), 255, -1)
 
-    gray_for_analysis = cv2.bitwise_and(gray, gray, mask=mask)
+    # 2. 🌟 [핵심 개선] 투명한 SD 배지 및 조명 불균형을 잡기 위한 CLAHE 전처리 적용 🌟
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray_clahe = clahe.apply(gray)
+    
+    gray_for_analysis = cv2.bitwise_and(gray_clahe, gray_clahe, mask=mask)
     blurred = cv2.GaussianBlur(gray_for_analysis, (5, 5), 0)
     mean_val = cv2.mean(blurred, mask=mask)[0]
+    
     temp_for_otsu = blurred.copy()
     temp_for_otsu[mask == 0] = int(mean_val)
     
+    # 적응형 오츠 임계값 처리
     _, thresh = cv2.threshold(temp_for_otsu, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
 
+    # 3. 노이즈 제거
     kernel = np.ones((3,3), np.uint8)
     opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
     sure_bg = cv2.dilate(opening, kernel, iterations=3)
 
+    # 4. 거리 변환 및 피크 찾기
     dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
     local_max = cv2.dilate(dist_transform, np.ones((5,5), np.uint8))
     sure_fg = np.uint8((dist_transform == local_max) & (dist_transform > 1.0)) * 255
 
+    # 5. 워터쉐드 마커 생성 및 적용
     unknown = cv2.subtract(sure_bg, sure_fg)
     ret, markers = cv2.connectedComponents(sure_fg)
     markers = markers + 1
@@ -98,7 +104,6 @@ def count_colonies_watershed(file_bytes, edge_crop=0.82, x_offset=0, y_offset=0,
     markers = cv2.watershed(original_bgr, markers)
     
     labels, counts = np.unique(markers, return_counts=True)
-    
     valid_labels = labels[(counts >= min_size) & (labels >= 2)]
     colony_count = len(valid_labels)
     
@@ -123,7 +128,7 @@ def count_colonies_watershed(file_bytes, edge_crop=0.82, x_offset=0, y_offset=0,
 
 # --- 웹 UI 구성 ---
 st.markdown('<div class="main-title">🧫 Auto Colony Counter</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Watershed Algorithm 기반 자동 배지 콜로니 계수 및 분석 도구 MADE BY 치현</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Watershed Algorithm 기반 자동 배지 콜로니 계수 및 분석 도구</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚙️ 분석 파라미터 설정")
@@ -132,7 +137,7 @@ with st.sidebar:
         edge_crop_val = st.slider(
             "테두리 절삭 비율", 
             min_value=0.70, max_value=0.95, value=0.82, step=0.01,
-            help="지정된 범위 내의 콜로니만 카운팅 합니다.0.85-0.90을 권장합니다."
+            help="0.85-0.90을 권장합니다."
         )
         
         st.markdown("<div style='text-align: center; color: #6c757d; font-size: 0.9em; margin-top: 10px;'>테두리 중심 미세 조정 (10px)</div>", unsafe_allow_html=True)
@@ -175,7 +180,7 @@ with st.sidebar:
         min_size_val = st.slider(
             "최소 콜로니 크기 (픽셀)", 
             min_value=0, max_value=200, value=15, step=1,
-            help="먼지 혹은 배지 스크레치 등을 걸러내기 위한, 콜로니 여부를 결정하는 최소 픽셀 수입니다. 80-120을 권장합니다."
+            help="80-120을 권장합니다."
         )
         bg_opacity_val = st.slider(
             "배경 투명도 (비침 정도)", 
@@ -199,12 +204,10 @@ if uploaded_file is not None:
         
         st.markdown("---")
         
-        # TNTC 여부와 상관없이 콜로니 개수 무조건 출력
         st.metric(label="Total Colony Count", value=f"{count} 개")
         
-        # 1000개가 넘어가면 하단에 경고 문구 추가 노출
         if count > 1000:
-            st.error("🚨 콜로니 수가 1000개 이상. TNTC (Too Numerous To Count) 입니다. 표시된 개수는 참고용으로만 활용하세요.")
+            st.error("🚨 TNTC (Too Numerous To Count) 상태입니다. 표시된 개수는 참고용으로만 활용하세요.")
             
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -218,4 +221,4 @@ if uploaded_file is not None:
             st.markdown("#### 분석 결과 (Watershed Mask)")
             st.image(result_img, use_container_width=True) 
 else:
-    st.info("👈 이미지를 업로드한 뒤, 좌측 사이드바에서 분석 파라미터를 설정하세요.")
+    st.info("👈 좌측 사이드바에서 분석 파라미터를 설정하고, 이미지를 업로드해 주세요.")
