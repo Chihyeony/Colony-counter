@@ -123,7 +123,7 @@ def count_colonies_watershed(file_bytes, edge_crop=0.82, x_offset=0, y_offset=0,
 
 # --- 웹 UI 구성 ---
 st.markdown('<div class="main-title">🧫 Auto Colony Counter</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Watershed Algorithm 기반 자동 배지 콜로니 계수 및 분석 도구</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Watershed Algorithm 기반 자동 배지 콜로니 계수 및 분석 도구 MADE BY 치현</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚙️ 분석 파라미터 설정")
@@ -132,13 +132,12 @@ with st.sidebar:
         edge_crop_val = st.slider(
             "테두리 절삭 비율", 
             min_value=0.70, max_value=0.95, value=0.82, step=0.01,
-            help="0.85-0.90을 권장합니다."
+            help="지정된 범위 내의 콜로니만 카운팅 합니다.0.85-0.90을 권장합니다."
         )
         
         st.markdown("<div style='text-align: center; color: #6c757d; font-size: 0.9em; margin-top: 10px;'>테두리 중심 미세 조정 (10px)</div>", unsafe_allow_html=True)
         move_step = 10 
         
-        # '초기화' 텍스트가 두 줄로 꺾이지 않도록 가운데 열을 더 넓게(1.5 비율) 설정
         col1, col2, col3 = st.columns([1, 1.5, 1])
         
         with col1:
@@ -176,7 +175,7 @@ with st.sidebar:
         min_size_val = st.slider(
             "최소 콜로니 크기 (픽셀)", 
             min_value=0, max_value=200, value=15, step=1,
-            help="80-120을 권장합니다."
+            help="먼지 혹은 배지 스크레치 등을 걸러내기 위한, 콜로니 여부를 결정하는 최소 픽셀 수입니다. 80-120을 권장합니다."
         )
         bg_opacity_val = st.slider(
             "배경 투명도 (비침 정도)", 
@@ -200,10 +199,12 @@ if uploaded_file is not None:
         
         st.markdown("---")
         
+        # TNTC 여부와 상관없이 콜로니 개수 무조건 출력
+        st.metric(label="Total Colony Count", value=f"{count} 개")
+        
+        # 1000개가 넘어가면 하단에 경고 문구 추가 노출
         if count > 1000:
-            st.error(f"🚨 TNTC (Too Numerous To Count) 상태입니다.")
-        else:
-            st.metric(label="Total Colony Count", value=f"{count} 개")
+            st.error("🚨 콜로니 수가 1000개 이상. TNTC (Too Numerous To Count) 입니다. 표시된 개수는 참고용으로만 활용하세요.")
             
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -217,4 +218,4 @@ if uploaded_file is not None:
             st.markdown("#### 분석 결과 (Watershed Mask)")
             st.image(result_img, use_container_width=True) 
 else:
-    st.info("👈 좌측 사이드바에서 분석 파라미터를 설정하고, 이미지를 업로드해 주세요.")
+    st.info("👈 이미지를 업로드한 뒤, 좌측 사이드바에서 분석 파라미터를 설정하세요.")
