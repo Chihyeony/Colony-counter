@@ -232,17 +232,17 @@ with st.sidebar:
         move_step = 10 
         col1, col2, col3 = st.columns([1, 1.5, 1])
         with col1:
-            if st.button("↖", use_container_width=True, help="왼쪽 위로 이동"): st.session_state.x_offset -= move_step; st.session_state.y_offset -= move_step
-            if st.button("⬅", use_container_width=True, help="왼쪽으로 이동"): st.session_state.x_offset -= move_step
-            if st.button("↙", use_container_width=True, help="왼쪽 아래로 이동"): st.session_state.x_offset -= move_step; st.session_state.y_offset += move_step
+            if st.button("↖", width="stretch", help="왼쪽 위로 이동"): st.session_state.x_offset -= move_step; st.session_state.y_offset -= move_step
+            if st.button("⬅", width="stretch", help="왼쪽으로 이동"): st.session_state.x_offset -= move_step
+            if st.button("↙", width="stretch", help="왼쪽 아래로 이동"): st.session_state.x_offset -= move_step; st.session_state.y_offset += move_step
         with col2:
-            if st.button("⬆", use_container_width=True, help="위로 이동"): st.session_state.y_offset -= move_step
-            if st.button("초기화", use_container_width=True, help="중심점을 원상복구합니다."): st.session_state.x_offset = 0; st.session_state.y_offset = 0
-            if st.button("⬇", use_container_width=True, help="아래로 이동"): st.session_state.y_offset += move_step
+            if st.button("⬆", width="stretch", help="위로 이동"): st.session_state.y_offset -= move_step
+            if st.button("초기화", width="stretch", help="중심점을 원상복구합니다."): st.session_state.x_offset = 0; st.session_state.y_offset = 0
+            if st.button("⬇", width="stretch", help="아래로 이동"): st.session_state.y_offset += move_step
         with col3:
-            if st.button("↗", use_container_width=True, help="오른쪽 위로 이동"): st.session_state.x_offset += move_step; st.session_state.y_offset -= move_step
-            if st.button("➡", use_container_width=True, help="오른쪽으로 이동"): st.session_state.x_offset += move_step
-            if st.button("↘", use_container_width=True, help="오른쪽 아래로 이동"): st.session_state.x_offset += move_step; st.session_state.y_offset += move_step
+            if st.button("↗", width="stretch", help="오른쪽 위로 이동"): st.session_state.x_offset += move_step; st.session_state.y_offset -= move_step
+            if st.button("➡", width="stretch", help="오른쪽으로 이동"): st.session_state.x_offset += move_step
+            if st.button("↘", width="stretch", help="오른쪽 아래로 이동"): st.session_state.x_offset += move_step; st.session_state.y_offset += move_step
     
     # 🚀 공통 파라미터 탭
     with st.expander("🎛️ 공통 설정 (크기 및 화면)", expanded=True):
@@ -302,10 +302,10 @@ if uploaded_file is not None:
         
         with col1:
             st.markdown("#### 원본 이미지")
-            st.image(original_img, use_container_width=True) 
+            st.image(original_img, width="stretch") 
             
         with col2:
             st.markdown(f"#### 분석 결과 ({marker_text})")
-            st.image(result_img, use_container_width=True) 
+            st.image(result_img, width="stretch") 
 else:
     st.info("👈 좌측 사이드바에서 분석 모드를 확인하고, 이미지를 업로드해 주세요.")
