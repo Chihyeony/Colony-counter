@@ -224,6 +224,10 @@ with st.sidebar:
             "영역 크기 설정", 0.70, 0.95, 0.85, 0.01,
             help="영역 내의 콜로니만 카운팅합니다. 배지 테두리의 빛 반사가 콜로니로 인식될 때 수치를 낮추세요."
         )
+        bg_opacity_val = st.slider(
+                    "배경 투명도", 0.0, 1.0, 0.15, 0.05,
+                    help="0.0이면 완전 검은색, 1.0이면 원본 밝기 그대로 표시됩니다."
+                )
         st.markdown("<div style='text-align: center; color: #6c757d; font-size: 0.9em; margin-top: 10px;'>영역 위치 미세 조정 (10px 단위)</div>", unsafe_allow_html=True)
         move_step = 10 
         col1, col2, col3 = st.columns([1, 1.5, 1])
@@ -246,10 +250,7 @@ with st.sidebar:
             "콜로니 인식 최소 크기", 1, 100, 10, 1,
             help="이 수치보다 작은 개체는 단순 먼지나 찌꺼기로 간주하여 카운트하지 않습니다."
         )
-        bg_opacity_val = st.slider(
-            "배경 투명도", 0.0, 1.0, 0.15, 0.05,
-            help="0.0이면 완전 검은색, 1.0이면 원본 밝기 그대로 표시됩니다."
-        )
+        
 
     # 🚀 Blob 선택 시에만 나타나는 전용 파라미터 탭
     circularity_val = 0.6 # Watershed 선택 시에도 기본 변수 할당 에러 방지
