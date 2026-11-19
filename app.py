@@ -10,7 +10,7 @@ import streamlit as st
 # ---------------------------------------------------------
 # ⚙️ 상수
 # ---------------------------------------------------------
-MAX_SIDE = 1500            # 처리용 최대 이미지 변 길이 (px)
+MAX_SIDE = 2000            # 처리용 최대 이미지 변 길이 (px). 작은 콜로니(0.3mm)를 살리려면 2000 이상 필요
 MAX_FILES = 10
 TNTC_LIMIT = 300           # 일반적인 계수 가능 범위 30~300 CFU
 TFTC_LIMIT = 30
@@ -18,6 +18,15 @@ DEFAULT_CIRCULARITY = 0.35
 MOVE_STEP = 10             # 영역 위치 미세 조정 단위 (처리 이미지 px)
 MARKER_MAX_COVERAGE = 0.25 # 배지의 25% 이상이 '네임펜'이면 배지 색으로 판단하고 제거를 끔
 ALL_IMAGES = -1
+NOISE_SIGMA_MULT = 4.0     # 판정 기준 = max(최소 대비, 노이즈σ × 이 값)
+SEED_BLUR_SIGMA = 1.0      # 거리변환 평활화 (가짜 봉우리 완화)
+SEED_H_MIN = 1.0           # 콜로니 중심으로 인정할 최소 돌출 높이
+SEED_H_FRAC = 0.3          # 돌출 높이 기준 = max(SEED_H_MIN, 최소 반지름 × 이 값)
+INTENSITY_WEIGHT = 1.0     # 씨앗 지형에 섞는 밝기 비중 (0 = 모양만). 돔형 콜로니는 중심이 가장 밝음
+# 경계 두께 / 봉우리 높이가 이 이상이면 한 콜로니로 다시 합침. None = 사용 안 함
+# (밝기를 섞으면 맞닿은 콜로니 접촉부도 밝아서 과하게 합쳐지므로 꺼 둠)
+MERGE_RATIO = None if INTENSITY_WEIGHT > 0 else 0.85
+STREAK_RATIO = 6.0         # 면적이 내접원의 이 배수를 넘는 가늘고 긴 영역은 잡음으로 제외
 
 # UI 기본 설정
 st.set_page_config(
@@ -199,14 +208,38 @@ def h_maxima(dist, h):
     return (dome >= h - 1e-3) & (dist > 0)
 
 
-def find_seeds(binary, min_d_px):
-    """콜로니 중심 후보(씨앗): 돌출 높이가 충분한 거리변환 봉우리만 (가장자리 요철로 인한 과분할 방지)."""
+def fill_small_holes(binary, max_hole_area):
+    """콜로니 안쪽 구멍(중심이 살짝 어두운 콜로니) 메우기 → 고리 모양으로 이중 계수되는 것 방지."""
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(cv2.bitwise_not(binary), connectivity=4)
+    holes = [i for i in range(n) if stats[i, cv2.CC_STAT_AREA] <= max_hole_area
+             and stats[i, cv2.CC_STAT_LEFT] > 0 and stats[i, cv2.CC_STAT_TOP] > 0]
+    if not holes:
+        return binary
+    out = binary.copy()
+    out[np.isin(lab, holes)] = 255
+    return out
+
+
+def find_seeds(prep):
+    """
+    콜로니 중심 후보(씨앗).
+    지형 = 거리변환(모양) + 밝기(돔 모양 콜로니는 중심이 가장 밝음).
+    밝기를 섞으면 크기가 다른 두 콜로니가 겹쳐도 작은 쪽 중심이 살아남는다.
+    반환: (opened_binary, landscape, seeds, raw_dist)
+    """
+    binary = fill_small_holes(prep["binary"], 0.5 * disk_area(prep["max_d_px"]))
     opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    dist = cv2.distanceTransform(opened, cv2.DIST_L2, 5)
-    dist = cv2.GaussianBlur(dist, (0, 0), 1.0)   # 테두리 노이즈로 생기는 가짜 봉우리 완화
-    r_min = min_d_px / 2
-    seeds = h_maxima(dist, max(1.5, 0.4 * r_min)) & (dist >= 0.5 * r_min) & (opened > 0)
-    return opened, dist, seeds
+    raw_dist = cv2.distanceTransform(opened, cv2.DIST_L2, 5)
+    land = raw_dist
+    if SEED_BLUR_SIGMA > 0:
+        land = cv2.GaussianBlur(land, (0, 0), SEED_BLUR_SIGMA)   # 테두리 노이즈로 생기는 가짜 봉우리 완화
+    if INTENSITY_WEIGHT > 0:
+        sig = cv2.GaussianBlur(prep["signal"].astype(np.float32), (0, 0), max(1.0, 0.2 * prep["min_d_px"]))
+        land = land + INTENSITY_WEIGHT * sig / max(1.0, prep["thr"])
+    land = land * (opened > 0)
+    r_min = prep["min_d_px"] / 2
+    seeds = h_maxima(land, max(SEED_H_MIN, SEED_H_FRAC * r_min)) & (raw_dist >= 0.5 * r_min) & (opened > 0)
+    return opened, land, seeds, raw_dist
 
 
 def merge_weak_splits(markers, dist, ratio=0.85):
@@ -262,25 +295,42 @@ def merge_weak_splits(markers, dist, ratio=0.85):
 
 
 def segment(prep):
-    """거리 지형 기반 watershed로 콜로니 영역을 나눈다. 반환: (markers, opened_binary). 콜로니 라벨은 2 이상."""
-    binary, dist, seeds = find_seeds(prep["binary"], prep["min_d_px"])
+    """
+    지형(모양+밝기) 기반 watershed로 콜로니 영역을 나눈다.
+    반환: (markers, opened_binary, n_streak). 콜로니 라벨은 2 이상, 1 = 줄무늬 형태 잡음(배지 벽 등).
+    """
+    binary, land, seeds, raw_dist = find_seeds(prep)
     _, markers = cv2.connectedComponents(seeds.astype(np.uint8))
     markers = (markers + 1) * seeds                # 씨앗=2.., 나머지=0(미정)
 
-    # 밝기 경사가 아닌 '거리' 지형에서 분할 → 붙은 콜로니 사이 잘록한 곳에서 나뉨
+    # 밝기 경사가 아닌 지형에서 분할 → 붙은 콜로니 사이 잘록한 곳에서 나뉨
     # (씨앗끼리만 경쟁시키고, 끝난 뒤 콜로니 영역(binary) 밖은 버림)
     # 콜로니 내부는 0~254, 배경은 255 → 콜로니 픽셀이 항상 자기 씨앗에서 먼저 채워짐
-    scale = 200.0 / max(1.0, prep["max_d_px"] / 2)
-    landscape = (254 - np.clip(dist * scale, 0, 254)).astype(np.uint8)
+    top = float(np.percentile(land[binary > 0], 99.9)) if np.any(binary) else 1.0
+    landscape = (254 - np.clip(land * (230.0 / max(1.0, top)), 0, 254)).astype(np.uint8)
     landscape[binary == 0] = 255
     markers = cv2.watershed(cv2.cvtColor(landscape, cv2.COLOR_GRAY2BGR), markers.astype(np.int32))
-    markers = merge_weak_splits(markers, dist)
+    if MERGE_RATIO is not None:
+        markers = merge_weak_splits(markers, land, MERGE_RATIO)
 
     # 콜로니 영역 밖, 그리고 씨앗이 없는(너무 작은) 덩어리는 버림
     _, comp = cv2.connectedComponents(binary)
     seeded = np.unique(comp[seeds])
     markers[(binary == 0) | ~np.isin(comp, seeded)] = 0
-    return markers, binary
+
+    # 가늘고 긴 줄무늬(배지 벽 반사, 긁힌 자국)는 콜로니가 아님 → 라벨 1
+    n = int(markers.max()) + 1
+    n_streak = 0
+    if n > 2:
+        pos = markers >= 2
+        areas = np.bincount(markers[pos], minlength=n)
+        peaks = np.zeros(n, np.float32)
+        np.maximum.at(peaks, markers[pos], raw_dist[pos])
+        streak = (areas > STREAK_RATIO * math.pi * np.maximum(peaks, 0.5) ** 2) & (np.arange(n) >= 2)
+        n_streak = int(streak.sum())
+        if n_streak:
+            markers[pos & streak[np.clip(markers, 0, n - 1)]] = 1
+    return markers, binary, n_streak
 
 
 # ---------------------------------------------------------
@@ -327,9 +377,13 @@ def prepare(file_bytes, offset, cfg):
 
     valid = inside & (exclusion == 0)
     d_in = diff[valid] if np.any(valid) else diff[inside]
-    med = float(np.median(d_in))
-    sigma = max(1.0, 1.4826 * float(np.median(np.abs(d_in - med))))  # 강건한 노이즈 추정
-    thr = max(float(cfg["min_contrast"]), 4.0 * sigma)
+    # 노이즈 추정은 배지 벽 반사가 섞이지 않는 안쪽 영역에서만
+    edge_dist = cv2.distanceTransform(dish_mask, cv2.DIST_L2, 5)
+    core = valid & (edge_dist > 0.10 * dish_d_px / 2)
+    d_core = diff[core] if np.count_nonzero(core) > 1000 else d_in
+    med = float(np.median(d_core))
+    sigma = max(1.0, 1.4826 * float(np.median(np.abs(d_core - med))))  # 강건한 노이즈 추정
+    thr = max(float(cfg["min_contrast"]), NOISE_SIGMA_MULT * sigma)
 
     # 4. 콜로니 밝기 방향(극성) 결정
     if cfg["polarity"] == "auto":
@@ -370,7 +424,7 @@ def recommend(file_bytes, offset, cfg):
     if prep["error"]:
         return "Blob", ""
 
-    markers, opened = segment(prep)
+    markers, opened, _ = segment(prep)
     n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(opened)
     areas = stats[:, cv2.CC_STAT_AREA]
     # 덩어리마다 몇 개의 콜로니로 나뉘었는지
@@ -418,12 +472,13 @@ def base_overlay(prep, bg_opacity):
 # 💧 1. Watershed 알고리즘
 # ---------------------------------------------------------
 def count_colonies_watershed(prep, bg_opacity):
-    markers, _ = segment(prep)
+    markers, _, n_streak = segment(prep)
     labels, counts = np.unique(markers, return_counts=True)
     is_colony = labels >= 2
     min_area, max_area = disk_area(prep["min_d_px"]), disk_area(prep["max_d_px"])
     valid_labels = labels[is_colony & (counts >= min_area) & (counts <= max_area)]
-    oversized_labels = labels[is_colony & (counts > max_area)]
+    # 크기 초과 + 줄무늬(라벨 1) → 빨간색으로 표시하고 세지 않음
+    oversized_labels = labels[(is_colony & (counts > max_area)) | (labels == 1)]
 
     img = base_overlay(prep, bg_opacity)
     for lbls, color in ((oversized_labels, (0, 0, 255)), (valid_labels, (0, 255, 0))):
@@ -432,7 +487,8 @@ def count_colonies_watershed(prep, bg_opacity):
         m = np.isin(markers, lbls).astype(np.uint8) * 255
         c, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(img, c, -1, color, 2)
-    return len(valid_labels), len(oversized_labels), img
+    n_excluded = int(np.count_nonzero(is_colony & (counts > max_area))) + n_streak
+    return len(valid_labels), n_excluded, img
 
 
 # ---------------------------------------------------------
@@ -531,7 +587,7 @@ with st.sidebar:
         )
         dish_mm = st.number_input("배지 지름 (mm)", 30.0, 200.0, 90.0, 5.0,
                                   help="픽셀↔mm 환산 기준. 일반 페트리 디쉬는 90mm.")
-        min_d_mm = st.slider("최소 콜로니 지름 (mm)", 0.1, 5.0, 0.5, 0.1)
+        min_d_mm = st.slider("최소 콜로니 지름 (mm)", 0.1, 5.0, 0.3, 0.1)
         max_d_mm = st.slider("최대 콜로니 지름 (mm)", 1.0, 30.0, 10.0, 0.5,
                              help="이보다 큰 덩어리(반사광, 얼룩 등)는 세지 않고 🔴빨간색으로 표시합니다.")
         if max_d_mm <= min_d_mm:
@@ -549,8 +605,9 @@ with st.sidebar:
                                        help="배지보다 채도가 훨씬 높은 영역을 지웁니다. 유색 배지/색소 콜로니에서 문제가 되면 끄세요.")
 
     with st.expander("✂️ 인식 영역 설정", expanded=False):
-        edge_crop_val = st.slider("영역 크기 설정", 0.70, 1.00, 0.95, 0.01,
-                                  help="배지 반지름 대비 분석 영역. 0.95 = 면적의 약 90% 분석.")
+        edge_crop_val = st.slider("영역 크기 설정", 0.70, 1.00, 0.90, 0.01,
+                                  help="배지 바깥 지름 대비 분석 영역. 플라스틱 벽(반사)을 빼고 한천 경계까지만 "
+                                       "잡도록 0.90이 기본값입니다. 벽 부분이 초록색으로 잡히면 낮추세요.")
         bg_opacity_val = st.slider("배경 투명도", 0.0, 1.0, 0.15, 0.05)
 
         st.markdown("<div style='text-align: center; color: #6c757d; font-size: 0.9em; margin-top: 10px;'>"
@@ -674,7 +731,7 @@ if uploaded_files:
             else:
                 status = "계수 범위"
             if res["oversized"]:
-                st.caption(f"🔴 최대 지름 초과로 제외된 덩어리: {res['oversized']}개")
+                st.caption(f"🔴 크기 초과·줄무늬로 제외된 덩어리: {res['oversized']}개")
             for w in prep["warnings"]:
                 st.warning(w)
 
@@ -682,7 +739,7 @@ if uploaded_files:
             with img_col1:
                 st.image(res["original_rgb"], caption="원본", width="stretch")
             with img_col2:
-                st.image(res["result_rgb"], caption="결과 (🟡네임펜 제외, 🔴크기 초과)", width="stretch")
+                st.image(res["result_rgb"], caption="결과 (🟡네임펜 제외, 🔴크기 초과·줄무늬)", width="stretch")
             st.markdown("---")
 
             rows.append({
@@ -695,7 +752,7 @@ if uploaded_files:
                 "콜로니 밝기": "밝음" if prep["bright"] else "어두움",
                 "대비 기준": round(prep["thr"], 1),
                 "네임펜 제외 비율": round(prep["excluded_ratio"], 4),
-                "크기 초과 제외": res["oversized"],
+                "크기초과·줄무늬 제외": res["oversized"],
                 "최소 지름(mm)": min_d_mm,
                 "최대 지름(mm)": max_d_mm,
                 "영역 크기": edge_crop_val,
